@@ -357,6 +357,7 @@ int update_registers(pid_t child, unsigned long long *params, void *str, data_in
 		}
 	}
 	ptrace_set_register(child, params, regs, return_value);
+	free(str);
 	return 0;
 }
 

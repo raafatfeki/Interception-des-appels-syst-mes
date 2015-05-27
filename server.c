@@ -210,6 +210,7 @@ void *execute_syscall(void *client_sock)
 			memcpy(recv_data +info.total_size, &syscall_return_value, sizeof(int));
 			send(csock, recv_data, info.total_size + sizeof(int), 0);
 		}
+		free(recv_data);
 	}
 	return NULL;
 }
