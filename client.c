@@ -8,6 +8,11 @@
 #define SOCKET_ERROR -1
 #define PORT 1234
 #define PAGE_SIZE getpagesize()
+#define RETURN_SIZE 4
+#define NULL_CHAR_SIZE 1
+#ifndef UNPREDICT_SIZE
+#define UNPREDICT_SIZE 1024
+#endif
 
 typedef int SOCKET;
 typedef struct sockaddr_in SOCKADDR_IN;
@@ -40,11 +45,13 @@ const int long_size = sizeof(long);
 #define PTRACE_ERROR -1
 #define ARG_SIZE(syscall_number, arg_num) syscall_table[syscall_number].argv[arg_num].arg_size
 #define ARG_FLAG(syscall_number, arg_num) syscall_table[syscall_number].argv[arg_num].flag
+#define SYS_INFO_FLAG(syscall_number) syscall_table[syscall_number].args.flag
+#define SYS_INFO_SIZE(syscall_number) syscall_table[syscall_number].args.total_args_size
 #define ARGS_NUMBER(syscall_number) syscall_table[syscall_number].argc
 
 void* set_syscall_data(pid_t child, int syscall_number, unsigned long long param[], data_info *info);
-static size_t get_data(pid_t child, long addr, size_t len, void **str, size_t *str_size);
-static size_t get_string(pid_t child, long addr, size_t len, void **str, size_t *str_size);
+static size_t get_data(pid_t child, long addr, size_t len, void **str, size_t *str_size, size_t *max_str_size);
+static size_t get_string(pid_t child, long addr, size_t len, void **str, size_t *str_size, size_t *max_str_size);
 static int put_data(pid_t child, long addr, void *str, size_t len);
 int update_registers(pid_t child, unsigned long long *params, void *str, data_info *info, struct user_regs_struct *regs, unsigned long long return_value);
 void getdata(pid_t child, long addr, char *str, int len);
@@ -54,7 +61,7 @@ int send_syscall(SOCKET sock, void **syscall_data, data_info *info);
 size_t get_buf_size(pid_t child, int syscall_number, unsigned long long *params);
 int init_data_info(data_info *info);
 size_t get_array_size(int syscall_number, unsigned long long *params);
-long get_matrix_data(pid_t child, long addr, long len, void **str, size_t *str_size, size_t data_size);
+long get_matrix_data(pid_t child, long addr, long len, void **str, size_t *str_size, size_t data_size, size_t *max_str_size);
 int put_matrix_data(pid_t child, long addr, long len, void *str, size_t data_size);
 
 int main()
@@ -119,7 +126,6 @@ int main()
 								ptrace_get_register(child_process, params, &regs);
 								/* Extract data from the child memory */
 								syscall_data = set_syscall_data(child_process, orig_rax, params, &info);
-
 								if (orig_rax == SYS_exit || orig_rax == SYS_exit_group)
 								{
 									/* Send data to server */
@@ -174,9 +180,10 @@ int main()
 									printf("This is the result of the syscall stat after updating the child memory\nif the values are the same with those printed in the server than the syscall has succeeded\n");
 									printf("==============================================================\n");
 									ptrace(PTRACE_GETREGS, child_process, NULL, regs);
-									void *str = NULL;
+									void *str = malloc(144);
 									size_t sizea = 0;
-									get_data(child_process, params[1], 144, &str, &sizea);
+									size_t max = 144;
+									get_data(child_process, params[1], 144, &str, &sizea, &max);
 									printf("st_dev=%d\nst_ino=%d\nst_mode=%d\nst_nlink=%d\nst_uid=%d\nst_gid=%d\nst_rdev=%d\nst_size=%d\nst_blksize=%d\nst_blocks=%d\n", 
 									(int) ((struct stat *)str)->st_dev,(int) ((struct stat *)str)->st_ino ,(int) ((struct stat *)str)->st_mode ,
 									(int) ((struct stat *)str)->st_nlink ,(int) ((struct stat *)str)->st_uid ,(int) ((struct stat *)str)->st_gid ,
@@ -205,8 +212,72 @@ void* set_syscall_data(pid_t child, int syscall_number, unsigned long long param
 	int arg_num;
 	size_t buff_size = 0;
 	size_t array_size = 0;
-
+	size_t predict_size = 0;
+	size_t max_str_size = 0;
 	init_data_info(info);
+
+	switch(SYS_INFO_FLAG(syscall_number))
+	{
+		case TS:
+			max_str_size = SYS_INFO_SIZE(syscall_number) + RETURN_SIZE;
+			data_to_send = malloc(max_str_size);
+			break;
+		case PS:
+		case NPS:
+			for (arg_num = 0; arg_num < syscall_table[syscall_number].argc; ++arg_num)
+			{
+				if ((ARG_FLAG(syscall_number, arg_num) == PT) && (ARG_SIZE(syscall_number, arg_num) == UNDEFINED_SIZE))
+				{ 
+					predict_size += get_buf_size(child, syscall_number, param);
+				}
+				if (ARG_FLAG(syscall_number, arg_num) == AT)
+				{
+					predict_size += (get_array_size(syscall_number, param) * ARG_SIZE(syscall_number, arg_num));
+				}
+				if (ARG_FLAG(syscall_number, arg_num) == MT)
+				{
+					printf("Deal with it later, special cases\n");
+				}
+				if (ARG_FLAG(syscall_number, arg_num) == ST)
+				{
+					switch(syscall_number)
+					{
+						case SYS_sethostname:
+						case SYS_setdomainname:
+						case SYS_readlink:
+						case SYS_listxattr:
+						case SYS_llistxattr:
+						case SYS_readlinkat:
+						case SYS_getcwd:
+						case SYS_read:
+						case SYS_write:
+						case SYS_pread64:
+						case SYS_pwrite64:
+						case SYS_syslog://// to verify, there are some ambiguities 
+						case SYS_flistxattr:
+						case SYS_lookup_dcookie:
+						case SYS_mq_timedreceive:
+						case SYS_getsockopt:
+						case SYS_setsockopt:
+						case SYS_mq_timedsend:
+							predict_size += get_buf_size(child, syscall_number, param) + NULL_CHAR_SIZE;
+							break;
+					}
+				}
+			}
+			if(SYS_INFO_FLAG(syscall_number) == PS)
+			{
+				max_str_size = SYS_INFO_SIZE(syscall_number) + predict_size + RETURN_SIZE;
+				data_to_send = malloc(max_str_size);
+			}
+			else
+			{
+				max_str_size = SYS_INFO_SIZE(syscall_number) + predict_size + UNPREDICT_SIZE + RETURN_SIZE;
+				data_to_send = malloc(max_str_size);
+			}
+			break;
+	}
+
 	if (ARGS_NUMBER(syscall_number) != 0)
 	{
 		for (arg_num = 0; arg_num < syscall_table[syscall_number].argc; ++arg_num)
@@ -214,29 +285,28 @@ void* set_syscall_data(pid_t child, int syscall_number, unsigned long long param
 			switch(ARG_FLAG(syscall_number, arg_num))
 			{
 				case VT:
-					data_to_send = realloc(data_to_send, ARG_SIZE(syscall_number, arg_num) + total_size);
 					memcpy(data_to_send + total_size, param + arg_num, ARG_SIZE(syscall_number, arg_num));
 					total_size += ARG_SIZE(syscall_number, arg_num);
 					break;
 				case AT:
 					array_size = get_array_size(syscall_number, param);
 					info->array_size = array_size;
-					get_data(child, param[arg_num], array_size * ARG_SIZE(syscall_number, arg_num), &(data_to_send), &(total_size));
+					get_data(child, param[arg_num], array_size * ARG_SIZE(syscall_number, arg_num), &(data_to_send), &(total_size), &(max_str_size));
 					break;
 				case MT:
 					array_size = get_array_size(syscall_number, param);
 					info->array_size = array_size;
 					if (syscall_number == SYS_move_pages)
 					{
-						get_matrix_data(child, param[arg_num], array_size, &(data_to_send), &(total_size), PAGE_SIZE);
+						get_matrix_data(child, param[arg_num], array_size, &(data_to_send), &(total_size), PAGE_SIZE, &(max_str_size));
 					}
 					if (syscall_number == SYS_io_submit)
 					{
-						get_matrix_data(child, param[arg_num], array_size, &(data_to_send), &(total_size), ARG_SIZE(syscall_number, arg_num));
+						get_matrix_data(child, param[arg_num], array_size, &(data_to_send), &(total_size), ARG_SIZE(syscall_number, arg_num), &(max_str_size));
 					}
 					if (syscall_number == SYS_execve)
 					{
-						info->string_sizes[string_counter] = get_matrix_data(child, param[arg_num], array_size, &(data_to_send), &(total_size), ARG_SIZE(syscall_number, arg_num));
+						info->string_sizes[string_counter] = get_matrix_data(child, param[arg_num], array_size, &(data_to_send), &(total_size), ARG_SIZE(syscall_number, arg_num), &(max_str_size));
 						++string_counter;
 					}
 					break;
@@ -244,47 +314,49 @@ void* set_syscall_data(pid_t child, int syscall_number, unsigned long long param
 					if (ARG_SIZE(syscall_number, arg_num) == UNDEFINED_SIZE)
 					{
 						buff_size = get_buf_size(child, syscall_number, param);
-						get_data(child, param[arg_num], buff_size, &(data_to_send), &(total_size));
+						get_data(child, param[arg_num], buff_size, &(data_to_send), &(total_size), &(max_str_size));
 					}
 					else
 					{
-						get_data(child, param[arg_num], ARG_SIZE(syscall_number, arg_num), &(data_to_send), &(total_size));
+						get_data(child, param[arg_num], ARG_SIZE(syscall_number, arg_num), &(data_to_send), &(total_size), &(max_str_size));
 					}
 					break;
 				case ST:
 					switch(syscall_number)
 					{
-						/* To verify later
 						case SYS_sethostname:
 						case SYS_setdomainname: 
-						*/
 						case SYS_readlink:
 						case SYS_listxattr:
 						case SYS_llistxattr:
 						case SYS_readlinkat:
 							if (string_counter == 0)
 							{
-								info->string_sizes[string_counter] = get_string(child, param[arg_num], UNDEFINED_SIZE, &(data_to_send), &(total_size));
+								info->string_sizes[string_counter] = get_string(child, param[arg_num], UNDEFINED_SIZE, &(data_to_send), &(total_size), &(max_str_size));
 							}
 							else
 							{
 								buff_size = get_buf_size(child, syscall_number, param);
-								info->string_sizes[string_counter] = get_string(child, param[arg_num], buff_size, &(data_to_send), &(total_size));
+								info->string_sizes[string_counter] = get_string(child, param[arg_num], buff_size, &(data_to_send), &(total_size), &(max_str_size));
 							}
 							break;
 						case SYS_getcwd:
 						case SYS_read:
+						case SYS_write:
 						case SYS_pread64:
+						case SYS_pwrite64:
 						case SYS_syslog://// to verify, there are some ambiguities 
 						case SYS_flistxattr:
 						case SYS_lookup_dcookie:
 						case SYS_mq_timedreceive:
 						case SYS_getsockopt:
+						case SYS_setsockopt:
+						case SYS_mq_timedsend:
 							buff_size = get_buf_size(child, syscall_number, param);
-							info->string_sizes[string_counter] = get_string(child, param[arg_num], buff_size, &(data_to_send), &(total_size));
+							info->string_sizes[string_counter] = get_string(child, param[arg_num], buff_size, &(data_to_send), &(total_size), &(max_str_size));
 							break;
 						default:
-							info->string_sizes[string_counter] = get_string(child, param[arg_num], UNDEFINED_SIZE, &(data_to_send), &(total_size));
+							info->string_sizes[string_counter] = get_string(child, param[arg_num], UNDEFINED_SIZE, &(data_to_send), &(total_size), &(max_str_size));
 							break;
 					}
 					++string_counter;
@@ -385,7 +457,7 @@ int ptrace_set_register(pid_t child, unsigned long long *params, struct user_reg
 	regs->r8 = params[4];
 	regs->r9 = params[5];
 	regs->rax = return_value;
-	return ptrace (PTRACE_SETREGS, child, NULL, regs); 
+	return ptrace(PTRACE_SETREGS, child, NULL, regs); 
 }
 
 int send_syscall(SOCKET sock, void **syscall_data, data_info *info)
@@ -401,7 +473,6 @@ int send_syscall(SOCKET sock, void **syscall_data, data_info *info)
 	else
 	{
 		send(sock, st , info->total_size, 0);
-		st = realloc(st, info->total_size + sizeof(int));
 		*syscall_data = st;
 		recv(sock, st, info->total_size + sizeof(int), 0);
 		memcpy(&syscall_number, st +info->total_size, sizeof(int));
@@ -410,7 +481,7 @@ int send_syscall(SOCKET sock, void **syscall_data, data_info *info)
 }
 
 
-static size_t get_string(pid_t child, long addr, size_t len, void **str, size_t *str_size)
+static size_t get_string(pid_t child, long addr, size_t len, void **str, size_t *str_size, size_t *max_str_size)
 {
 	int cond = 0;
   	int i, j;
@@ -425,13 +496,17 @@ static size_t get_string(pid_t child, long addr, size_t len, void **str, size_t 
     {
     	while(cond != -1)
 		{
+			if (*max_str_size - *str_size - long_size < 0)
+			{
+				*str = realloc(*str, *str_size + UNPREDICT_SIZE);
+				*max_str_size = *str_size + UNPREDICT_SIZE;
+			}
 			data.val = ptrace(PTRACE_PEEKDATA,child, addr + cond * 8, NULL);
 			++cond;
 			for (i = 0; i < long_size; ++i)
 			{
 				if (data.chars[i] == '\0')
 				{
-					st = realloc(st, *str_size + i + 1);
 					memcpy(st + *str_size, data.chars, i + 1);
 					*str_size += i + 1;
 					string_size += i + 1;
@@ -442,7 +517,6 @@ static size_t get_string(pid_t child, long addr, size_t len, void **str, size_t 
 				{
 					if (i == long_size -1)
 					{
-						st = realloc(st, *str_size + long_size);
 						memcpy(st + *str_size, data.chars, long_size);
 						*str_size += long_size;
 						string_size += long_size;
@@ -454,12 +528,12 @@ static size_t get_string(pid_t child, long addr, size_t len, void **str, size_t 
 	}
 	else
 	{
-		string_size = get_data(child, addr, len+1, str, str_size);
+		string_size = get_data(child, addr, len+1, str, str_size, max_str_size);
 	}
   return string_size;
 } 
 
-static size_t get_data(pid_t child, long addr, size_t len, void **str, size_t *str_size)
+static size_t get_data(pid_t child, long addr, size_t len, void **str, size_t *str_size, size_t *max_str_size)
 {
 	void *st;
 	int i, j;
@@ -467,10 +541,12 @@ static size_t get_data(pid_t child, long addr, size_t len, void **str, size_t *s
 
 	i = 0;
 	j = len / long_size;
+	if (*max_str_size - *str_size - len < 0)
+	{
+		*str = realloc(*str, *str_size + UNPREDICT_SIZE);
+		*max_str_size = *str_size + UNPREDICT_SIZE;
+	}
 	st = *str;
-	st = realloc(st, *str_size + len);
-	*str = st; 
-	
 	
 	while(i < j) 
 	{
@@ -523,15 +599,15 @@ size_t get_buf_size(pid_t child, int syscall_number, unsigned long long *params)
 			case SYS_io_submit:///////!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 			case SYS_move_pages:///////!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 			case SYS_init_module://not string void *
-			/* To verify later
 			case SYS_sethostname:
-			case SYS_setdomainname: 
-			*/
+			case SYS_setdomainname:
 			case SYS_poll: // array
 				return (size_t)params[1];
 				break;
 			case SYS_read:
+			case SYS_write:
 			case SYS_pread64:
+			case SYS_pwrite64:
 			case SYS_readlink:
 			case SYS_syslog://// to verify, there are some ambiguities 
 			case SYS_listxattr:
@@ -544,6 +620,7 @@ size_t get_buf_size(pid_t child, int syscall_number, unsigned long long *params)
 			case SYS_modify_ldt://not string void *
 			case SYS_readv: // array
 			case SYS_writev: // array
+			case SYS_mq_timedsend:
 				return (size_t)params[2];
 				break;
 			case SYS_readlinkat:
@@ -555,6 +632,9 @@ size_t get_buf_size(pid_t child, int syscall_number, unsigned long long *params)
 			case SYS_fgetxattr://not string void *
 			case SYS_add_key://not string void *
 				return (size_t)params[3];
+				break;
+			case SYS_setsockopt:
+				return (size_t)params[4];
 				break;
 			case SYS_getsockopt://// the 4 is a pointer to the buf size
 				return (size_t) ptrace(PTRACE_PEEKDATA, child, params[4], NULL);
@@ -640,7 +720,7 @@ int init_data_info(data_info *info)
 	return 0;
 }
 
-long get_matrix_data(pid_t child, long addr, long len, void **str, size_t *str_size, size_t data_size) // for sys_io_submit and sys_move_pages
+long get_matrix_data(pid_t child, long addr, long len, void **str, size_t *str_size, size_t data_size, size_t *max_str_size) // for sys_io_submit and sys_move_pages
 {
 	int i = 0;
 	long data_ptr;
@@ -656,7 +736,7 @@ long get_matrix_data(pid_t child, long addr, long len, void **str, size_t *str_s
 			}
 			else
 			{
-				get_string(child, data_ptr, data_size, str, str_size);
+				get_string(child, data_ptr, data_size, str, str_size, max_str_size);
 			}
 			++i;
 		}
@@ -667,7 +747,7 @@ long get_matrix_data(pid_t child, long addr, long len, void **str, size_t *str_s
 		for (i = 0; i < len; ++i)
 		{
 			data_ptr = ptrace(PTRACE_PEEKDATA,child, addr + i * 8, NULL); 
-			get_data(child, data_ptr, data_size, str, str_size);
+			get_data(child, data_ptr, data_size, str, str_size, max_str_size);
 		}
 	}
 	return len;

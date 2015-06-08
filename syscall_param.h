@@ -1,26 +1,44 @@
+typedef int sys_size_t;
 typedef enum arg_options
 {
 	POINTER_TYPE, STRING_TYPE, VALUE_TYPE, ARRAY_TYPE, MATRIX_TYPE
 }arg_options;
 
+typedef enum size_options
+{
+	TOTAL_SIZE, PREDICTABLE_SIZE, NOT_PREDICTABLE_SIZE
+}size_options;
+
 typedef struct syscall_arg_info
 {
 	arg_options flag;
-	size_t arg_size;
+	sys_size_t arg_size;
 }arg_info;
+
+typedef struct syscall_size_info
+{
+	size_options flag;
+	sys_size_t total_args_size;
+}syscall_size_info;
 
 typedef struct syscall_info
 {
-	unsigned int argc;
+	sys_size_t argc;
+	syscall_size_info args;
 	arg_info argv[6];
 }syscall_info;
 
-/* Define the Flags*/
+/* Define args type Flags*/
 #define PT POINTER_TYPE
 #define ST STRING_TYPE
 #define VT VALUE_TYPE
 #define AT ARRAY_TYPE
 #define MT MATRIX_TYPE
+
+/* Define syscall size Flags*/
+#define TS TOTAL_SIZE
+#define PS PREDICTABLE_SIZE
+#define NPS NOT_PREDICTABLE_SIZE
 
 #define NOT_IMPLEMENTED -1
 #define UNDEFINED_SIZE -1
